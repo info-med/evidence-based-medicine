@@ -1,17 +1,18 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"github.com/gocolly/colly/v2"
-	"github.com/gocolly/colly/v2/debug"
+	"github.com/google/uuid"
+	"github.com/meilisearch/meilisearch-go"
+	"os"
 	"strings"
 	"time"
 )
 
 type guide struct {
-	Name string
-	Url  string
+	Id   string `json:"id"`
+	Name string `json:"name"`
+	Url  string `json:"url"`
 }
 
 type category struct {
@@ -21,7 +22,6 @@ type category struct {
 func main() {
 	c := colly.NewCollector(
 		colly.Async(true),
-		colly.Debugger(&debug.LogDebugger{}),
 	)
 	c.OnError(func(resp *colly.Response, err error) {
 		resp.Request.Retry()
@@ -29,19 +29,22 @@ func main() {
 	c.Limit(&colly.LimitRule{
 		Delay: 1 * time.Second,
 	})
+	meilisearchClient := meilisearch.NewClient(meilisearch.ClientConfig{
+		Host: "http://127.0.0.1:7700",
+	})
 
-	scrape(c)
-	// Add to Meilisearch
+	guides := scrape(c)
+	addToMeilisearch(guides, meilisearchClient)
 }
 
-func scrape(c *colly.Collector) {
-	fmt.Println("scrape()")
+func scrape(c *colly.Collector) []guide {
 	categories := getCategories(c)
 	guides := []guide{}
 
 	c.OnHTML(".entry-content > ol", func(h *colly.HTMLElement) {
 		h.ForEach("li", func(_ int, el *colly.HTMLElement) {
 			guides = append(guides, guide{
+				Id:   uuid.NewString(),
 				Name: strings.Title(strings.ToLower(el.ChildText("a"))),
 				Url:  strings.ReplaceAll(el.ChildAttr("a", "href"), "http://mz.gov.mk", "https://zdravstvo.gov.mk"),
 			})
@@ -49,25 +52,15 @@ func scrape(c *colly.Collector) {
 	})
 
 	for _, url := range categories {
-		fmt.Println("Visiting", url.Url)
 		c.Visit(url.Url)
 	}
 
 	c.Wait()
 
-	d, err := json.Marshal(guides)
-
-	if err != nil {
-		fmt.Printf("Error: %s", err)
-
-		return
-	}
-
-	fmt.Println(string(d))
+	return guides
 }
 
 func getCategories(c *colly.Collector) []category {
-	fmt.Println("getCategories()")
 	categories := []category{}
 	c.OnHTML(".entry-content > ul", func(h *colly.HTMLElement) {
 		h.ForEach("li", func(_ int, el *colly.HTMLElement) {
@@ -78,4 +71,13 @@ func getCategories(c *colly.Collector) []category {
 	c.Wait()
 
 	return categories
+}
+
+func addToMeilisearch(guides []guide, meilisearchClient *meilisearch.Client) {
+	evidenceIndex := meilisearchClient.Index("evidence-based-medicine")
+
+	_, err := evidenceIndex.AddDocuments(guides)
+	if err != nil {
+		os.Exit(1)
+	}
 }
